@@ -16,6 +16,8 @@ import shutil
 
 import requests
 from tenacity import retry, wait_exponential, retry_if_exception_type
+from tqdm import tqdm  # Add this import at the top of the file
+
 
 from .errors import ValidationError, RequestError
 from .crypto import (a32_to_base64, encrypt_key, base64_url_encode,
@@ -745,6 +747,7 @@ class Mega:
             shutil.move(temp_output_file.name, output_path)
             return output_path
 
+
     def upload(self, filename, dest=None, dest_filename=None):
         # determine storage node
         if dest is None:
@@ -765,7 +768,6 @@ class Mega:
                 128, initial_value=((ul_key[4] << 32) + ul_key[5]) << 64)
             aes = AES.new(k_str, AES.MODE_CTR, counter=count)
 
-            upload_progress = 0
             completion_file_handle = None
 
             mac_str = '\0' * 16
@@ -773,35 +775,34 @@ class Mega:
                                     mac_str.encode("utf8"))
             iv_str = a32_to_str([ul_key[4], ul_key[5], ul_key[4], ul_key[5]])
             if file_size > 0:
-                for chunk_start, chunk_size in get_chunks(file_size):
-                    chunk = input_file.read(chunk_size)
-                    upload_progress += len(chunk)
+                with tqdm(total=file_size, unit='B', unit_scale=True, desc=f"Uploading {os.path.basename(filename)}") as pbar:
+                    for chunk_start, chunk_size in get_chunks(file_size):
+                        chunk = input_file.read(chunk_size)
 
-                    encryptor = AES.new(k_str, AES.MODE_CBC, iv_str)
-                    for i in range(0, len(chunk) - 16, 16):
+                        encryptor = AES.new(k_str, AES.MODE_CBC, iv_str)
+                        for i in range(0, len(chunk) - 16, 16):
+                            block = chunk[i:i + 16]
+                            encryptor.encrypt(block)
+
+                        # fix for files under 16 bytes failing
+                        if file_size > 16:
+                            i += 16
+                        else:
+                            i = 0
+
                         block = chunk[i:i + 16]
-                        encryptor.encrypt(block)
+                        if len(block) % 16:
+                            block += makebyte('\0' * (16 - len(block) % 16))
+                        mac_str = mac_encryptor.encrypt(encryptor.encrypt(block))
 
-                    # fix for files under 16 bytes failing
-                    if file_size > 16:
-                        i += 16
-                    else:
-                        i = 0
-
-                    block = chunk[i:i + 16]
-                    if len(block) % 16:
-                        block += makebyte('\0' * (16 - len(block) % 16))
-                    mac_str = mac_encryptor.encrypt(encryptor.encrypt(block))
-
-                    # encrypt file and upload
-                    chunk = aes.encrypt(chunk)
-                    output_file = requests.post(ul_url + "/" +
-                                                str(chunk_start),
-                                                data=chunk,
-                                                timeout=self.timeout)
-                    completion_file_handle = output_file.text
-                    logger.info('%s of %s uploaded', upload_progress,
-                                file_size)
+                        # encrypt file and upload
+                        chunk = aes.encrypt(chunk)
+                        output_file = requests.post(ul_url + "/" +
+                                                    str(chunk_start),
+                                                    data=chunk,
+                                                    timeout=self.timeout)
+                        completion_file_handle = output_file.text
+                        pbar.update(len(chunk))
             else:
                 output_file = requests.post(ul_url + "/0",
                                             data='',
